@@ -74,7 +74,7 @@ static void release(void)
 static void install(void)
 {
 	struct gnub__cmd_arr arr = {0};
-	gnub__install_lib(&arr, libname, prefix, 0, "./include/");
+	gnub__install_lib(&arr, libname, prefix, 0, "./include/", libname);
 	gnub__execute_commands(&arr);
 	gnub__free_commands(&arr);
 }

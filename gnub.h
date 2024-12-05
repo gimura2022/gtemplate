@@ -1,101 +1,500 @@
+/* include part */
+
+#ifndef _gnub_h
+#define _gnub_h
+
+#include <stdlib.h>
+#include <stddef.h>
+#include <stdbool.h>
 #include <stdio.h>
-#include <stdarg.h>
+#include <unistd.h>
 #include <dirent.h>
+#include <sys/stat.h>
 #include <string.h>
 
-#define gnub_impl
-#include "gnub.h"
+#define GNUB_MAX_CMD_PART_LENGHT 1024
+#define GNUB_MAX_CMD_LEN 1024
+#define GNUB_MAX_FILE_NAME 64
+#define GNUB_MAX_TARGET_NAME 64
+#define GNUB_MAX_TARGETS 32
 
-static const char* cflags     = " -std=c99 -Wall -Wpedantic ";
-static const char* cflags_rel = " -O3 -DRELEASE ";
-static const char* cflags_deb = " -O0 -g -DDEBUG ";
+#define GNUB_FIND_C_FILES_MAX_FILES 64
 
-static const char* cppflags = " -I include ";
+#define array_lenght(x) sizeof(x) / sizeof(x[0])
 
-static const char* ldflags = " -fPIC -lglog ";
+struct _gnub__cmd_part {
+	struct _gnub__cmd_part* next;
+	char str[GNUB_MAX_CMD_PART_LENGHT];
+};
 
-static const char* libname = "glex";
+struct _gnub__cmd {
+	struct _gnub__cmd* next;
 
-static char* cc = "cc";
-static char* ar = "ar";
-static char* prefix = "/usr/";
+	struct _gnub__cmd_part* start;
+	struct _gnub__cmd_part* end;
+};
 
-static char cflags_out[512]   = {0};
-static char ldflags_out[512]  = {0};
-static char cppflags_out[512] = {0};
+struct gnub__cmd_arr {
+	struct _gnub__cmd* start;
+	struct _gnub__cmd* end;
+};
 
-static char*** argv_ptr;
+typedef void (*gnub__target_hendler_t)(void);
 
-static void die(const char* msg, ...)
+struct _gnub__target {
+	char name[GNUB_MAX_TARGET_NAME];
+	gnub__target_hendler_t handler;
+};
+
+/* private functions */
+
+void _gnub__append_command(struct gnub__cmd_arr* arr, const size_t count, const char** parts);
+void _gnub__append_parts_to_last(struct gnub__cmd_arr* arr, const size_t count, const char** parts);
+void _gnub__append_parts_by_index(struct gnub__cmd_arr* arr, const size_t count, const char** parts);
+
+/* public functions */
+
+int gnub__execute_commands(struct gnub__cmd_arr* cmds);
+void gnub__free_commands(struct gnub__cmd_arr* cmds);
+
+bool gnub__find_c_files(const char* path, char output[GNUB_FIND_C_FILES_MAX_FILES][2][GNUB_MAX_FILE_NAME],
+		size_t* count);
+
+void gnub__create_executable(struct gnub__cmd_arr* arr, const char* ld, const char* name,
+		const char* ldflags,
+		char output[GNUB_FIND_C_FILES_MAX_FILES][2][GNUB_MAX_FILE_NAME], const size_t count);
+
+void gnub__create_static_lib(struct gnub__cmd_arr* arr, const char* ar, const char* name,
+		const char* ldflags,
+		char output[GNUB_FIND_C_FILES_MAX_FILES][2][GNUB_MAX_FILE_NAME], const size_t count);
+void gnub__create_shared_lib(struct gnub__cmd_arr* arr, const char* cc, const char* name,
+		const char* ldflags,
+		char output[GNUB_FIND_C_FILES_MAX_FILES][2][GNUB_MAX_FILE_NAME], const size_t count);
+void gnub__create_lib(struct gnub__cmd_arr* arr, const char* ar, const char* cc, const char* name,
+		const char* ldflags,
+		char output[GNUB_FIND_C_FILES_MAX_FILES][2][GNUB_MAX_FILE_NAME], const size_t count);
+
+void gnub__install_lib(struct gnub__cmd_arr* arr, const char* name, const char* prefix, int type,
+		const char* include, const char* path);
+
+bool gnub__recompile_self_with_build_arr(struct gnub__cmd_arr* arr, const char* output_file, char* argv[]);
+bool gnub__recompile_self(char* argv[]);
+bool gnub__compile_subproject(const char* path, char* argv[]);
+
+void gnub__add_target(const char* name, gnub__target_hendler_t handler);
+void gnub__run_targets(int argc, char* argv[], const char* defaults_target[], const size_t count);
+
+char* gnub__get_env_variable(char* name, char* or_default);
+
+#define _gnub__parts_command(x, arr, ...) ({ const char* __parts[] = {__VA_ARGS__}; \
+		x(arr, array_lenght(__parts), __parts); })
+
+#define gnub__append_command(arr, ...) _gnub__parts_command(_gnub__append_command, arr, __VA_ARGS__)
+#define gnub__append_parts_to_last(arr, ...) _gnub__parts_command(_gnub__append_parts_to_last, \
+		arr, __VA_ARGS__)
+#define gnub__append_parts_by_index(arr, ...) _gnub__parts_command(_gnub__append_parts_by_index, \
+		arr, __VA_ARGS__)
+
+#endif
+
+/* implementation part */
+
+#ifdef gnub_impl
+
+/* private functions */
+
+static void _gnub__append_to_command(struct _gnub__cmd* cmd, const size_t count, const char** parts)
 {
-	va_list args;
-	va_start(args, msg);
+	for (size_t i = 0; i < count; i++) {
+		memcpy(cmd->end->str, parts[i], strlen(parts[i]));
 
-	vfprintf(stderr, msg, args);
-
-	va_end(args);
-
-	exit(-1);
+		cmd->end->next = (struct _gnub__cmd_part*) malloc(sizeof(struct _gnub__cmd_part));
+		cmd->end       = cmd->end->next;
+		cmd->end->next = NULL;
+		memset(cmd->end->str, '\0', sizeof(cmd->end->str));
+	}
 }
 
-static void compile(void)
+void _gnub__append_command(struct gnub__cmd_arr* arr, const size_t count, const char** parts)
 {
-	strcat(cflags_out, cflags);
-	strcat(cppflags_out, cppflags);
-	strcat(ldflags_out, ldflags);
+	bool is_first_cmd = false;
 
-	struct gnub__cmd_arr compile_commands = {0};
+	if (arr->start == NULL) {
+		is_first_cmd = true;
 
-	char objects[GNUB_FIND_C_FILES_MAX_FILES][2][GNUB_MAX_FILE_NAME] = {0};
-	size_t count;
-	gnub__find_c_files("src/", objects, &count);
-
-	for (size_t i = 0; i < count; i++) {
-		gnub__append_command(&compile_commands, cc, cflags_out, cppflags_out, "-c", "-o",
-				objects[i][1], objects[i][0], ldflags_out);
+		arr->start     = (struct _gnub__cmd*) malloc(sizeof(struct _gnub__cmd));
+		arr->end       = arr->start;
+		arr->end->next = NULL;
 	}
 
-	gnub__create_lib(&compile_commands, ar, cc, libname, ldflags_out, objects, count);
+	if (!is_first_cmd) {
+		arr->end->next = (struct _gnub__cmd*) malloc(sizeof(struct _gnub__cmd));
+		arr->end       = arr->end->next;
+		arr->end->next = NULL;
+	}
 
-	gnub__execute_commands(&compile_commands);
-	gnub__free_commands(&compile_commands);
+	arr->end->start     = (struct _gnub__cmd_part*) malloc(sizeof(struct _gnub__cmd_part));
+	arr->end->end       = arr->end->start;
+	arr->end->end->next = NULL;
+	memset(arr->end->end->str, '\0', sizeof(arr->end->end->str));
+
+	_gnub__append_to_command(arr->end, count, parts);
 }
 
-static void debug(void)
+static int _gnub__execute_command(struct _gnub__cmd* cmd)
 {
-	strcpy(cflags_out, cflags_deb);
+	char out_command[GNUB_MAX_CMD_PART_LENGHT];
+	memset(out_command, '\0', sizeof(out_command));
+
+	struct _gnub__cmd_part* part = cmd->start;
+	while (part != NULL) {
+		strcat(out_command, part->str);	
+		strcat(out_command, " ");
+
+		part = part->next;
+	}
+
+	printf("%s\n", out_command);
+	return system(out_command);
 }
 
-static void release(void)
+static void _gnub__free_command(struct _gnub__cmd* cmd)
 {
-	strcpy(cflags_out, cflags_rel);
+	struct _gnub__cmd_part* part = cmd->start;
+	while (part != NULL) {
+		struct _gnub__cmd_part* next = part->next;
+		free(part);
+		part = next;
+	}
+
+	free(cmd);
 }
 
-static void install(void)
+void _gnub__append_parts_to_last(struct gnub__cmd_arr* arr, const size_t count, const char** parts)
 {
-	struct gnub__cmd_arr arr = {0};
-	gnub__install_lib(&arr, libname, prefix, 0, "./include/");
-	gnub__execute_commands(&arr);
-	gnub__free_commands(&arr);
+	_gnub__append_to_command(arr->end, count, parts); // TODO: add check to empty command array
 }
 
-int main(int argc, char* argv[])
+void _gnub__append_parts_by_index(struct gnub__cmd_arr* arr, const size_t count, const char** parts)
 {
-	argv_ptr = &argv;
+	size_t i               = 0;
+	struct _gnub__cmd* cmd = arr->start;
+	while (i < count && cmd != NULL) {
+		i++;
+		cmd = cmd->next;
+	}
 
-	cc     = getenv("CC")     == NULL ? cc : getenv("CC");
-	ar     = getenv("AR")     == NULL ? ar : getenv("AR");
-	prefix = getenv("PREFIX") == NULL ? prefix : getenv("PREFIX");
+	_gnub__append_to_command(cmd, count, parts);
+}
 
-	gnub__recompile_self(argv);
+static bool _gnub__compare_files(const char* file0, const char* file1)
+{
+	FILE* file0_ds = fopen(file0, "rb");
+	FILE* file1_ds = fopen(file1, "rb");
 
-	gnub__add_target("release", release);
-	gnub__add_target("debug", debug);
-	gnub__add_target("compile", compile);
-	gnub__add_target("install", install);
+	int c0 = fgetc(file0_ds);
+	int c1 = fgetc(file1_ds);
 
-	const char* default_targets[] = { "release", "compile", "install" };
-	gnub__run_targets(argc, argv, default_targets, array_lenght(default_targets));
+	bool is_eq = false;
+
+	while (c0 != EOF && c1 != EOF) {
+		if (c0 != c1) goto done;	
+
+		c0 = fgetc(file0_ds);
+		c1 = fgetc(file1_ds);
+	}
+
+	if (c0 == EOF && c1 == EOF) {
+		is_eq = true;
+		goto done;
+	}
+
+done:
+	fclose(file0_ds);
+	fclose(file1_ds);
+
+	return is_eq;
+}
+
+/* public functions */
+
+int gnub__execute_commands(struct gnub__cmd_arr* cmds)
+{
+	struct _gnub__cmd* cmd = cmds->start;
+
+	int count, i;
+	struct _gnub__cmd* cur_cmd = cmd;
+	for (count = 0; cur_cmd != NULL; count++, (cur_cmd = cur_cmd->next));
+
+	i = 0;
+	while (cmd != NULL) {
+		printf("[executing %i/%i] ", i, count);	
+
+		int code = _gnub__execute_command(cmd);
+		if (code != 0) {
+			return code;
+		}
+
+		cmd = cmd->next;
+		i++;
+	}
 
 	return 0;
 }
+
+void gnub__free_commands(struct gnub__cmd_arr* cmds)
+{
+	struct _gnub__cmd* cmd = cmds->start;
+	while (cmd != NULL) {
+		struct _gnub__cmd* next = cmd->next;
+		_gnub__free_command(cmd);
+		cmd = next;
+	}
+}
+
+bool gnub__recompile_self_with_build_arr(struct gnub__cmd_arr* arr, const char* output_file, char* argv[])
+{
+	if (strcmp(output_file, argv[0]) == 0) return false;
+	if (gnub__execute_commands(arr) != 0) return false;
+	if (_gnub__compare_files(output_file, argv[0])) {
+		remove(output_file);
+		return true;
+	}
+
+	gnub__free_commands(arr);
+
+	remove(argv[0]);
+	rename(output_file, argv[0]);
+
+	execv(argv[0], argv);
+	exit(0);
+}
+
+bool gnub__recompile_self(char* argv[])
+{
+	struct gnub__cmd_arr cmds = {0};
+
+	char output_file[32] = {0};
+	strcpy(output_file, argv[0]);
+	strcat(output_file, ".new");
+
+	gnub__append_command(&cmds, "cc", "-o", output_file, "gnub.c");
+
+	bool result = gnub__recompile_self_with_build_arr(&cmds, output_file, argv);
+	gnub__free_commands(&cmds);
+
+	return result;
+}
+
+bool gnub__find_c_files(const char* path, char output[GNUB_FIND_C_FILES_MAX_FILES][2][GNUB_MAX_FILE_NAME],
+		size_t* count)
+{
+	DIR* dir = opendir(path);
+	struct dirent* entry;
+	size_t i = 0;
+
+	if (dir == NULL) return false;	
+
+	while ((entry = readdir(dir)) != NULL) {
+		char file_name[64] = {0};
+		strcat(file_name, path);
+		strcat(file_name, entry->d_name);
+
+		if (entry->d_type == DT_REG &&
+				strcmp(file_name + strlen(file_name) - 2, ".c") == 0) {
+			char output_file[64] = {0};
+			strcat(output_file, file_name);
+			strcat(output_file, ".o");
+
+			strcpy(output[i][0], file_name);
+			strcpy(output[i][1], output_file);
+			i++;
+		}
+	}
+
+	*count = i;
+
+	closedir(dir);
+
+	return true;
+}
+
+void gnub__create_executable(struct gnub__cmd_arr* arr, const char* ld, const char* name,
+		const char* ldflags,
+		char output[GNUB_FIND_C_FILES_MAX_FILES][2][GNUB_MAX_FILE_NAME], const size_t count)
+{
+	char files_str[1024] = {0};
+	for (int i = 0; i < count; i++) {
+		strcat(files_str, output[i][1]);
+		strcat(files_str, " ");
+	}
+
+	gnub__append_command(arr, ld, "-o", name, files_str, ldflags);
+}
+
+void gnub__create_static_lib(struct gnub__cmd_arr* arr, const char* ar, const char* name,
+		const char* ldflags,
+		char output[GNUB_FIND_C_FILES_MAX_FILES][2][GNUB_MAX_FILE_NAME], const size_t count)
+{
+	char files_str[1024] = {0};
+	for (int i = 0; i < count; i++) {
+		strcat(files_str, output[i][1]);
+		strcat(files_str, " ");
+	}
+
+	char lib_name[GNUB_MAX_FILE_NAME] = {0};
+	strcat(lib_name, "lib");
+	strcat(lib_name, name);
+	strcat(lib_name, ".a");
+
+	gnub__append_command(arr, ar, "rcs", lib_name, files_str);
+}
+
+void gnub__create_shared_lib(struct gnub__cmd_arr* arr, const char* cc, const char* name,
+		const char* ldflags,
+		char output[GNUB_FIND_C_FILES_MAX_FILES][2][GNUB_MAX_FILE_NAME], const size_t count)
+{
+	char files_str[1024] = {0};
+	for (int i = 0; i < count; i++) {
+		strcat(files_str, output[i][1]);
+		strcat(files_str, " ");
+	}
+	
+	char lib_name[GNUB_MAX_FILE_NAME] = {0};
+	strcat(lib_name, "lib");
+	strcat(lib_name, name);
+	strcat(lib_name, ".so");
+
+	gnub__append_command(arr, cc, "-shared", "-o", lib_name, files_str, ldflags);
+}
+
+void gnub__create_lib(struct gnub__cmd_arr* arr, const char* ar, const char* cc, const char* name,
+		const char* ldflags,
+		char output[GNUB_FIND_C_FILES_MAX_FILES][2][GNUB_MAX_FILE_NAME], const size_t count)
+{
+	gnub__create_shared_lib(arr, cc, name, ldflags, output, count);
+	gnub__create_static_lib(arr, ar, name, ldflags, output, count);
+}
+
+bool gnub__compile_subproject(const char* path, char* argv[])
+{
+	printf("compiling subproject %s\n", path);
+
+	char path_to_gnub[GNUB_MAX_FILE_NAME] = {0};
+	strcat(path_to_gnub, "./");
+	strcat(path_to_gnub, path);
+	strcat(path_to_gnub, "/gnub");
+
+	struct stat tmp;
+	if (stat(path_to_gnub, &tmp) == -1) {
+		char path_to_gnub_c[GNUB_MAX_FILE_NAME] = {0};
+		strcpy(path_to_gnub_c, path_to_gnub);
+		strcat(path_to_gnub_c, ".c");
+
+		struct gnub__cmd_arr arr = {0};
+		gnub__append_command(&arr, "cc", "-o", path_to_gnub, path_to_gnub_c);
+
+		gnub__execute_commands(&arr);
+		gnub__free_commands(&arr);
+	}
+
+	char old_dir[GNUB_MAX_FILE_NAME] = {0};
+	getcwd(old_dir, sizeof(old_dir));
+
+	chdir(path);
+	system("./gnub");
+	chdir(old_dir);
+
+	printf("\nend compiling subproject %s\n", path);
+}
+
+void gnub__install_lib(struct gnub__cmd_arr* arr, const char* name, const char* prefix, int type,
+		const char* include, const char* path)
+{
+	char libpath[GNUB_MAX_FILE_NAME] = {0};
+	strcat(libpath, prefix);
+	strcat(libpath, "/lib");
+
+	char includepath[GNUB_MAX_FILE_NAME] = {0};
+	strcat(includepath, prefix);
+	strcat(includepath, "/include/");
+	strcat(includepath, path);
+
+	char all_includefiles[GNUB_MAX_FILE_NAME] = {0};
+	strcat(all_includefiles, include);
+	strcat(all_includefiles, "/*");
+
+	char libname[GNUB_MAX_FILE_NAME] = {0};
+	strcat(libname, "lib");
+	strcat(libname, name);
+
+	char libname_static[GNUB_MAX_FILE_NAME] = {0};
+	strcat(libname_static, libname);
+	strcat(libname_static, ".a");
+
+	char libname_shared[GNUB_MAX_FILE_NAME] = {0};
+	strcat(libname_shared, libname);
+	strcat(libname_shared, ".so");
+
+	gnub__append_command(arr, "install -d", libpath);
+	switch (type) {
+	case 0:	
+	case 1:
+		gnub__append_command(arr, "install -m 644", libname_static, libpath);
+		if (type != 0) break;
+
+	case 2:
+		gnub__append_command(arr, "install -m 755", libname_shared, libpath);
+	}
+
+	gnub__append_command(arr, "install -d", includepath);
+	gnub__append_command(arr, "install -m 644", all_includefiles, includepath);
+}
+
+static struct _gnub__target targets[GNUB_MAX_TARGETS];
+static size_t targets_count = 0;
+
+void gnub__add_target(const char* name, gnub__target_hendler_t handler)
+{
+	struct _gnub__target target = {0};
+	strcpy(target.name, name);	
+	target.handler = handler;
+
+	targets[targets_count++] = target;
+}
+
+static void _gnub__run_target(const char* name)
+{
+	bool found = false;
+	for (int i = 0; i < targets_count; i++) {
+		if (strcmp(targets[i].name, name) == 0) {
+			targets[i].handler();
+			found = true;
+		}
+	}
+
+	if (!found) {
+		fprintf(stderr, "Target %s not found\n", name);
+		exit(-1);
+	}
+}
+
+void gnub__run_targets(int argc, char* argv[], const char* defaults_target[], const size_t count)
+{
+	if (argc == 1) {
+		for (int i = 0; i < count; i++) {
+			_gnub__run_target(defaults_target[i]);
+		}
+	}
+
+	for (int i = 1; i < argc; i++) {
+		_gnub__run_target(argv[i]);
+	}
+}
+
+char* gnub__get_env_variable(char* name, char* or_default)
+{
+	return getenv(name) == NULL ? or_default : getenv(name);
+}
+
+#endif
